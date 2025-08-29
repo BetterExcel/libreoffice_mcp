@@ -19,6 +19,7 @@ from datetime import datetime
 import httpx
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import FastMCP
+from mcp.server.websocket import websocket_server
 
 # Initialize FastMCP server
 mcp = FastMCP("LibreOffice MCP Server")
@@ -534,6 +535,7 @@ def insert_text_at_position(path: str, text: str, position: str = "end") -> Docu
 def _insert_text_writer_document(path: str, content: str) -> bool:
     """Insert text into Writer document using LibreOffice macro approach"""
     try:
+        backslash="""        text.setString("{content.replace('"', '\\"')}")"""
         # Create a temporary script file for LibreOffice macro
         script_content = f'''
 import uno
@@ -564,7 +566,7 @@ def modify_document():
         
         # Clear content and insert new content
         text = doc.getText()
-        text.setString("{content.replace('"', '\\"')}")
+        {backslash}
         
         # Save document
         doc.store()
@@ -953,6 +955,24 @@ def get_document_statistics(path: str) -> Dict[str, Any]:
             "error": f"Could not analyze content: {str(e)}"
         }
 
+# --- WebSocket app for uvicorn ---
+from starlette.applications import Starlette
+from starlette.routing import WebSocketRoute
+from mcp.server.websocket import websocket_server
+
+def make_ws_handler(mcp):
+    async def ws_handler(scope, receive, send):
+        async with websocket_server(scope, receive, send) as (read_stream, write_stream):
+            await mcp.run_transport(read_stream, write_stream)
+    return ws_handler
+
+# expose Starlette app so uvicorn can find it
+app = Starlette(
+    routes=[
+        WebSocketRoute("/mcp", make_ws_handler(mcp)),
+    ]
+)
+
 
 # Main server entry point
 def main():
@@ -999,7 +1019,18 @@ def main():
     print("", file=sys.stderr)
     
     try:
-        mcp.run()
+        # stdio transport
+        # mcp.run()
+        import sys
+        import uvicorn
+        if "--ws" in sys.argv:
+            print("🚀 Starting LibreOffice MCP Server (WebSocket mode) on ws://localhost:3000/mcp")
+        
+            uvicorn.run(app, host="0.0.0.0", port=3000)
+        else:
+            print("🚀 Starting LibreOffice MCP Server (stdio mode)")
+            mcp.run()
+
     except KeyboardInterrupt:
         print("\n👋 LibreOffice MCP Server stopped", file=sys.stderr)
     except Exception as e:

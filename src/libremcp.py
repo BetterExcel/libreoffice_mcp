@@ -443,7 +443,7 @@ def read_spreadsheet_data(path: str, sheet_name: Optional[str] = None, max_rows:
                 '--outdir', tmp_dir,
                 str(path_obj)
             ])
-            
+            print('result is ',result)
             csv_file = Path(tmp_dir) / (path_obj.stem + '.csv')
             if not csv_file.exists():
                 raise RuntimeError("Failed to convert spreadsheet to CSV")
@@ -955,23 +955,30 @@ def get_document_statistics(path: str) -> Dict[str, Any]:
             "error": f"Could not analyze content: {str(e)}"
         }
 
+# # Register a custom JSON-RPC method manually
+# @mcp.rpc_method("tools/list")
+# def list_tools(paging: Optional[dict] = None):
+#     return {
+#         "tools": mcp.describe_tools(),  # built-in helper
+#         "paging": None
+#     }
 # --- WebSocket app for uvicorn ---
 from starlette.applications import Starlette
-from starlette.routing import WebSocketRoute
+from starlette.routing import Route
 from mcp.server.websocket import websocket_server
 
-def make_ws_handler(mcp):
-    async def ws_handler(scope, receive, send):
-        async with websocket_server(scope, receive, send) as (read_stream, write_stream):
-            await mcp.run_transport(read_stream, write_stream)
-    return ws_handler
+from starlette.routing import WebSocketRoute
 
-# expose Starlette app so uvicorn can find it
+async def ws_handler(websocket):
+    scope, receive, send = websocket.scope, websocket.receive, websocket.send
+    async with websocket_server(scope, receive, send) as (read_stream, write_stream):
+        await mcp.serve_transport(read_stream, write_stream)
+
 app = Starlette(
-    routes=[
-        WebSocketRoute("/mcp", make_ws_handler(mcp)),
-    ]
+    routes=[WebSocketRoute("/mcp", ws_handler)]
 )
+
+
 
 
 # Main server entry point

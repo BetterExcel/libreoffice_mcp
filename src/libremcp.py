@@ -955,7 +955,119 @@ def get_document_statistics(path: str) -> Dict[str, Any]:
             "error": f"Could not analyze content: {str(e)}"
         }
 
-# # Register a custom JSON-RPC method manually
+
+import uno
+
+@mcp.tool()
+def update_spreadsheet_uno(path: str, sheet_name: str, cell: str, value: str) -> Dict[str, Any]:
+    """
+    Update a single cell in a spreadsheet using LibreOffice UNO API.
+
+    Args:
+        path: Full path to the spreadsheet (.ods or .xlsx)
+        sheet_name: The sheet to update
+        cell: The cell reference (e.g., "A1", "B3")
+        value: The value to insert
+    """
+    try:
+        # Connect to LibreOffice running in socket mode
+        local_context = uno.getComponentContext()
+        resolver = local_context.ServiceManager.createInstanceWithContext(
+            "com.sun.star.bridge.UnoUrlResolver", local_context
+        )
+        ctx = resolver.resolve("uno:socket,host=127.0.0.1,port=2002;urp;StarOffice.ComponentContext")
+        smgr = ctx.ServiceManager
+        desktop = smgr.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+
+        # Open the spreadsheet
+        url = unohelper.systemPathToFileUrl(path)
+        doc = desktop.loadComponentFromURL(url, "_blank", 0, ())
+
+        # Get the sheet
+        sheets = doc.getSheets()
+        sheet = sheets.getByName(sheet_name)
+
+        # Access the cell and write value
+        cell_obj = sheet.getCellRangeByName(cell)
+        cell_obj.setString(str(value))
+
+        # Read back to verify
+        verified_value = cell_obj.getString()
+
+        # Save & dispose document
+        doc.store()
+        doc.dispose()  # better than close(True) for UNO cleanup
+
+        return {
+            "success": True,
+            "path": path,
+            "sheet": sheet_name,
+            "cell": cell,
+            "written_value": value,
+            "verified_value": verified_value
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}# # Register a custom JSON-RPC method manually
+
+import pandas as pd
+from openpyxl import load_workbook
+from pathlib import Path
+
+@mcp.tool()
+def update_spreadsheet_pandas(
+    path: str, 
+    sheet_name: Optional[str] = None,  # make it optional
+    cell: str = "A1", 
+    value: str = "", 
+    save_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Update a single cell in a spreadsheet using openpyxl.
+    If no sheet_name is provided, defaults to the first sheet.
+    """
+    try:
+        file_path = Path(path)
+        if not file_path.exists():
+            return {"success": False, "error": f"File not found: {path}"}
+
+        # Load workbook
+        wb = load_workbook(filename=path)
+
+        # Default to the first sheet if sheet_name not provided
+        if not sheet_name:
+            ws = wb[wb.sheetnames[0]]
+            sheet_name = ws.title
+        elif sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            return {"success": False, "error": f"Sheet not found: {sheet_name}"}
+
+        # Write the value
+        ws[cell] = value
+
+        # Save back
+        if not save_path:
+            save_path = path
+        wb.save(save_path)
+
+        # Verify by reloading from the saved file
+        wb2 = load_workbook(filename=save_path, data_only=True)
+        verified_value = wb2[sheet_name][cell].value
+
+        return {
+            "success": True,
+            "path": str(save_path),
+            "sheet": sheet_name,
+            "cell": cell,
+            "written_value": value,
+            "verified_value": verified_value,
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # @mcp.rpc_method("tools/list")
 # def list_tools(paging: Optional[dict] = None):
 #     return {

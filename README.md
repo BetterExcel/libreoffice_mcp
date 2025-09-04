@@ -6,6 +6,14 @@ A comprehensive Model Context Protocol (MCP) server that provides tools and reso
 [![LibreOffice](https://img.shields.io/badge/LibreOffice-24.2+-green.svg)](https://www.libreoffice.org/)
 [![MCP Protocol](https://img.shields.io/badge/MCP-2024--11--05-orange.svg)](https://spec.modelcontextprotocol.io/)
 
+## How to use 
+
+to interact via cli :- source src/quick_start.sh
+
+then start a websocket connetion with:- websocat -H="Sec-WebSocket-Protocol: mcp" ws://localhost:8000/message
+
+then put any jsonrpc commands/payloads. You can see the commands.txt for examples
+
 ## 📂 Repository Structure
 
 This repository is organized into logical directories:

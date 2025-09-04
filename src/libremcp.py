@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass
 from datetime import datetime
-
+import pandas as pd
 import httpx
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import FastMCP
@@ -421,21 +421,81 @@ def get_document_info(path: str) -> DocumentInfo:
     return _get_document_info(path)
 
 
-@mcp.tool()
-def read_spreadsheet_data(path: str, sheet_name: Optional[str] = None, max_rows: int = 100) -> SpreadsheetData:
-    """Read data from a LibreOffice Calc spreadsheet
+# @mcp.tool()
+# def read_spreadsheet_data(path: str, sheet_name: Optional[str] = None, max_rows: int = 100) -> SpreadsheetData:
+#     """Read data from a LibreOffice Calc spreadsheet
     
+#     Args:
+#         path: Path to the spreadsheet file (.ods, .xlsx, etc.)
+#         sheet_name: Name of the specific sheet to read (if None, reads first sheet)
+#         max_rows: Maximum number of rows to read (default 100)
+#     """
+#     path_obj = Path(path)
+#     if not path_obj.exists():
+#         raise FileNotFoundError(f"Spreadsheet not found: {path}")
+    
+#     try:
+#         # Convert to CSV to easily read the data
+#         with tempfile.TemporaryDirectory() as tmp_dir:
+#             result = _run_libreoffice_command([
+#                 '--headless',
+#                 '--convert-to', 'csv',
+#                 '--outdir', tmp_dir,
+#                 str(path_obj)
+#             ])
+#             print('result is ',result)
+#             csv_file = Path(tmp_dir) / (path_obj.stem + '.csv')
+#             if not csv_file.exists():
+#                 raise RuntimeError("Failed to convert spreadsheet to CSV")
+            
+#             # Read CSV data
+#             import csv
+#             data = []
+#             with open(csv_file, 'r', encoding='utf-8') as f:
+#                 reader = csv.reader(f)
+#                 for i, row in enumerate(reader):
+#                     if i >= max_rows:
+#                         break
+#                     data.append(row)
+            
+#             row_count = len(data)
+#             col_count = max(len(row) for row in data) if data else 0
+            
+#             return SpreadsheetData(
+#                 sheet_name=sheet_name or "Sheet1",
+#                 data=data,
+#                 row_count=row_count,
+#                 col_count=col_count
+#             )
+            
+#     except Exception as e:
+#         raise RuntimeError(f"Failed to read spreadsheet: {str(e)}")
+
+
+@mcp.tool()
+def read_spreadsheet_data(
+    path: str,
+    sheet_name: Optional[str] = None,
+    max_rows: int = 100,
+    cell_range: Optional[str] = None,
+    save_path: Optional[str] = None
+) -> SpreadsheetData:
+    """
+    Read data from a LibreOffice Calc spreadsheet.
+
     Args:
         path: Path to the spreadsheet file (.ods, .xlsx, etc.)
         sheet_name: Name of the specific sheet to read (if None, reads first sheet)
-        max_rows: Maximum number of rows to read (default 100)
+        max_rows: Maximum number of rows to read (default 100, ignored if cell_range is set)
+        cell_range: Excel-style range to read (e.g., "A1:C10"). If provided, only that range is returned.
+        save_path: Optional path to save the extracted data as CSV
     """
     path_obj = Path(path)
     if not path_obj.exists():
         raise FileNotFoundError(f"Spreadsheet not found: {path}")
     
     try:
-        # Convert to CSV to easily read the data
+        # Convert to CSV
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = _run_libreoffice_command([
                 '--headless',
@@ -443,34 +503,38 @@ def read_spreadsheet_data(path: str, sheet_name: Optional[str] = None, max_rows:
                 '--outdir', tmp_dir,
                 str(path_obj)
             ])
-            print('result is ',result)
             csv_file = Path(tmp_dir) / (path_obj.stem + '.csv')
             if not csv_file.exists():
                 raise RuntimeError("Failed to convert spreadsheet to CSV")
             
-            # Read CSV data
-            import csv
-            data = []
-            with open(csv_file, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                for i, row in enumerate(reader):
-                    if i >= max_rows:
-                        break
-                    data.append(row)
-            
-            row_count = len(data)
-            col_count = max(len(row) for row in data) if data else 0
-            
+            import pandas as pd
+            df = pd.read_csv(csv_file, header=None)
+
+            if cell_range:
+                from openpyxl.utils import range_boundaries
+                min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+
+                # Adjust indices (pandas is 0-based, Excel is 1-based)
+                df = df.iloc[min_row-1:max_row, min_col-1:max_col]
+
+            else:
+                df = df.head(max_rows)
+            if save_path:
+                df.to_excel(save_path, index=False, header=False)
+
+            data = df.fillna("").astype(str).values.tolist()
+            row_count, col_count = df.shape
+
             return SpreadsheetData(
                 sheet_name=sheet_name or "Sheet1",
                 data=data,
                 row_count=row_count,
                 col_count=col_count
             )
-            
+
     except Exception as e:
         raise RuntimeError(f"Failed to read spreadsheet: {str(e)}")
-
+    
 
 @mcp.tool()
 def insert_text_at_position(path: str, text: str, position: str = "end") -> DocumentInfo:
@@ -1254,26 +1318,32 @@ def open_document_in_libreoffice(path: str, readonly: bool = False) -> Dict[str,
         raise FileNotFoundError(f"Document not found: {path}")
     
     try:
-        # Build command to open LibreOffice with GUI
-        cmd = ['libreoffice']
-        
+        # Force Calc for spreadsheets, Writer for others
+        ext = path_obj.suffix.lower()
+        if ext in [".xls", ".xlsx", ".ods", ".csv"]:
+            cmd = ["soffice", "--calc"]
+        elif ext in [".odt", ".doc", ".docx", ".rtf", ".txt"]:
+            cmd = ["soffice", "--writer"]
+        elif ext in [".odp", ".ppt", ".pptx"]:
+            cmd = ["soffice", "--impress"]
+        else:
+            cmd = ["soffice"]  # fallback, let LibreOffice decide
+
         if readonly:
-            cmd.append('--view')
+            cmd.append("--view")
         
-        # Add the document path
         cmd.append(str(path_obj.absolute()))
-        
-        # Start LibreOffice GUI (non-blocking)
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True  # Detach from parent process
+            start_new_session=True
         )
         
         return {
             "success": True,
-            "message": f"Opened {path_obj.name} in LibreOffice GUI",
+            "message": f"Opened {path_obj.name} in LibreOffice Calc" if ext in [".xls", ".xlsx", ".ods", ".csv"] else f"Opened {path_obj.name} in LibreOffice",
             "path": str(path_obj.absolute()),
             "readonly": readonly,
             "process_id": process.pid,
@@ -1282,7 +1352,6 @@ def open_document_in_libreoffice(path: str, readonly: bool = False) -> Dict[str,
         
     except Exception as e:
         raise RuntimeError(f"Failed to open document in LibreOffice: {str(e)}")
-
 
 @mcp.tool()
 def refresh_document_in_libreoffice(path: str) -> Dict[str, Any]:

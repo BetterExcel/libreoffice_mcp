@@ -5,6 +5,7 @@ This MCP server provides tools and resources for interacting with LibreOffice do
 It supports reading, writing, and manipulating Writer documents, Calc spreadsheets, 
 and other LibreOffice formats.
 """
+from __future__ import annotations
 
 import asyncio
 import json
@@ -20,6 +21,14 @@ import httpx
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import FastMCP
 from mcp.server.websocket import websocket_server
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+import os
+import json
+from llm_util import call_llm
+import pandas as pd
+import numpy as np
+from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype, is_bool_dtype
 
 # Initialize FastMCP server
 mcp = FastMCP("LibreOffice MCP Server")
@@ -595,6 +604,86 @@ def insert_text_at_position(path: str, text: str, position: str = "end") -> Docu
     except Exception as e:
         raise RuntimeError(f"Failed to insert text: {str(e)}")
 
+
+def _to_py(x):
+    return x.item() if isinstance(x, np.generic) else x
+
+def _prep_prompt(profile: Dict[str, Any], all_columns: List[str]) -> str:
+    """
+    Build a concise prompt for the LLM.
+    """
+    return (
+        "You are analyzing spreadsheet columns. "
+        "For the column shown, summarize in one or two sentences:\n"
+        "- What this column likely contains\n"
+        "- How it might relate to the other columns in the sheet\n\n"
+        f"Column profile:\n{profile}\n\n"
+        f"Other columns in this sheet: {all_columns}\n"
+    )
+
+# assuming the hedaer is always qat row 0 
+def _load_table(path: Path, sample_rows: Optional[int],sheet_name:str=0) -> pd.DataFrame:
+    ext = path.suffix.lower()
+    nrows = None if not sample_rows or sample_rows <= 0 else int(sample_rows)
+    if ext in {".csv", ".tsv", ".txt"}:
+        sep = "\t" if ext == ".tsv" else None
+        return pd.read_csv(path, sep=sep, nrows=nrows, on_bad_lines="skip", low_memory=False)
+    if ext in {".xlsx", ".xls"}:
+        return pd.read_excel(path,sheet_name=sheet_name,header=None, nrows=nrows)
+    if ext == ".json":
+        try:
+            return pd.read_json(path, sheet_name,lines=True, nrows=nrows)
+        except ValueError:
+            df = pd.read_json(path)
+            return df.head(nrows) if nrows else df
+    if ext == ".parquet":
+        df = pd.read_parquet(path)
+        return df.head(nrows) if nrows else df
+    # Fallback: attempt CSV
+    return pd.read_csv(path, nrows=nrows, on_bad_lines="skip", low_memory=False)
+
+@mcp.tool()
+def summarize_columns_llm(
+    path: str,
+    sample_rows: int = 10000,
+    sheet_name: Union[str, int] = 0,
+    provider: str = "ollama",
+    model: str = "llama3.1:8b",
+) -> List[Dict[str, Any]]:
+    """
+    Summarize each column in a spreadsheet with its dtype and an LLM-generated description.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    
+    df= _load_table(p, sample_rows, sheet_name)
+    if df.empty:
+        raise ValueError("No data found in the specified sheet or file.")
+    out: List[Dict[str, Any]] = []
+    all_columns = df.columns.tolist()
+
+    for col in df.columns:
+        s = df[col]
+        profile = {
+            "column": str(col),
+            "dtype": str(s.dtype),
+            "example_values": s.dropna().astype(str).head(5).tolist(),
+            "non_null": int(s.notna().sum()),
+            "nulls": int(s.isna().sum()),
+            "unique": int(s.nunique(dropna=True)),
+        }
+        try:
+            llm_summary = call_llm(_prep_prompt(profile, all_columns))
+        except Exception as e:
+            llm_summary = f"(fallback) Column {col} dtype={profile['dtype']}, examples={profile['example_values']} (Error: {e})"
+
+        out.append({**profile, "llm_summary": llm_summary})
+
+    # remove this
+    with open("temp.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    return out
 
 def _insert_text_writer_document(path: str, content: str) -> bool:
     """Insert text into Writer document using LibreOffice macro approach"""
